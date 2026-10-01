@@ -1,0 +1,178 @@
+#version 450
+
+struct Particle {
+    vec2 position;
+    vec2 velocity;
+    float life;
+    int typeIndex;
+    float seed;
+    float padding;
+};
+
+struct ParticleType {
+    vec4 color;
+    float size;
+    float opacity;
+    float lifeDuration;
+    int shape;
+    int fadeType;
+    int velocityProfile;
+    int padding1;
+    int padding2;
+};
+
+layout(std140, binding = 0) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+layout(std140, binding = 1) readonly buffer TypeBuffer {
+    ParticleType types[];
+};
+
+layout(push_constant) uniform Constants {
+    float deltaTime;
+    float timeSpeed;
+    vec2 gravity;
+    int globalMovement;
+    int particleCount;
+    int reset;
+    float time;
+} push;
+
+float rand(vec2 co) {
+    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+float noise(vec2 st) {
+    vec2 i = floor(st);
+    vec2 f = fract(st);
+    float a = rand(i);
+    float b = rand(i + vec2(1.0, 0.0));
+    float c = rand(i + vec2(0.0, 1.0));
+    float d = rand(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+
+vec2 getSpawnVelocity(int profile, float seed1, float seed2) {
+    if (profile == 0) { // Omni
+        return vec2((seed1 - 0.5) * 2.0, (seed2 - 0.5) * 2.0);
+    } else if (profile == 1) { // Upward
+        return vec2((seed1 - 0.5) * 0.5, 1.0 + seed2 * 0.5);
+    } else if (profile == 2) { // Downward
+        return vec2((seed1 - 0.5) * 0.5, -1.0 - seed2 * 0.5);
+    } else if (profile == 3) { // Horizontal
+        return vec2(1.0 + seed1 * 0.5, (seed2 - 0.5) * 0.5);
+    } else if (profile == 4) { // Outward burst
+        float angle = seed1 * 6.2831853;
+        return vec2(cos(angle), sin(angle)) * (1.0 + seed2 * 2.0);
+    }
+    return vec2(0.0);
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= push.particleCount) return;
+
+    Particle p = particles[index];
+    ParticleType pt = types[p.typeIndex];
+
+    float r1 = rand(vec2(index, push.time + p.seed));
+    float r2 = rand(vec2(push.time + p.seed, index));
+
+    if (push.reset == 1) {
+        p.position = vec2((r1 - 0.5) * 2.0, (r2 - 0.5) * 2.0);
+        p.velocity = getSpawnVelocity(pt.velocityProfile, r1, r2);
+        p.life = pt.lifeDuration * r1; // Start with random life to avoid bulk death
+        p.seed = r1;
+        particles[index] = p;
+        return;
+    }
+
+    vec2 pos = p.position;
+    vec2 vel = p.velocity;
+    float dt = push.deltaTime * push.timeSpeed;
+    
+    vec2 force = push.gravity;
+
+    // 20 Global Movements
+    int gm = push.globalMovement;
+    if (gm == 1) { // Downward
+        force += vec2(0.0, -1.0);
+    } else if (gm == 2) { // Vortex
+        vec2 dir = vec2(0.0) - pos;
+        float dist = max(length(dir), 0.1);
+        force += vec2(-dir.y, dir.x) / dist * 2.0 - dir * 0.5;
+    } else if (gm == 3) { // Black Hole
+        vec2 dir = vec2(0.0) - pos;
+        float dist = max(length(dir), 0.1);
+        force += normalize(dir) * 1.0 / (dist * dist);
+    } else if (gm == 4) { // Explosion
+        force += vel * 2.0;
+    } else if (gm == 5) { // Wind Right
+        force += vec2(2.0, 0.0);
+    } else if (gm == 6) { // Wind Left
+        force += vec2(-2.0, 0.0);
+    } else if (gm == 7) { // Spiral
+        vec2 dir = vec2(0.0) - pos;
+        force += vec2(-dir.y, dir.x) * 3.0 + dir * 1.0;
+    } else if (gm == 8) { // Wave
+        force += vec2(1.0, sin(pos.x * 5.0 + push.time * 10.0));
+    } else if (gm == 9) { // Turbulence
+        float n1 = noise(pos * 5.0 + push.time);
+        float n2 = noise(pos * 5.0 - push.time);
+        force += vec2(n1 - 0.5, n2 - 0.5) * 5.0;
+    } else if (gm == 10) { // Anti-Gravity
+        force += vec2(0.0, 1.0);
+    } else if (gm == 11) { // Dipole
+        vec2 p1 = vec2(0.5, 0.0) - pos;
+        vec2 p2 = vec2(-0.5, 0.0) - pos;
+        force += normalize(p1) / max(dot(p1,p1), 0.1) - normalize(p2) / max(dot(p2,p2), 0.1);
+    } else if (gm == 12) { // Orbit
+        vec2 dir = vec2(0.0) - pos;
+        force += vec2(-dir.y, dir.x) * 2.0;
+    } else if (gm == 13) { // Tornado
+        vec2 dir = vec2(0.0, pos.y) - pos;
+        force += vec2(-dir.y, dir.x) * 5.0 + vec2(0.0, 1.0);
+    } else if (gm == 14) { // Pulsar
+        vec2 dir = vec2(0.0) - pos;
+        force += dir * sin(push.time * 5.0) * 5.0;
+    } else if (gm == 15) { // Swirl
+        float angle = atan(pos.y, pos.x);
+        float dist = length(pos);
+        force += vec2(cos(angle + 1.57), sin(angle + 1.57)) * dist * 3.0;
+    } else if (gm == 16) { // Geyser
+        if (pos.y < -0.8 && abs(pos.x) < 0.2) force += vec2(0.0, 5.0);
+    } else if (gm == 17) { // Repulsion
+        vec2 dir = pos - vec2(0.0);
+        float dist = max(length(dir), 0.1);
+        force += normalize(dir) * 1.0 / (dist);
+    } else if (gm == 18) { // Fountain
+        force += vec2(0.0, -1.0); // Gravity
+        if (pos.y < -0.9 && abs(pos.x) < 0.1) vel = vec2((rand(pos)-0.5)*0.5, 2.0);
+    } else if (gm == 19) { // Zigzag
+        force += vec2(sin(push.time * 20.0) * 5.0, -1.0);
+    }
+
+    vel += force * dt;
+    pos += vel * dt;
+
+    if (pos.x > 1.0) pos.x -= 2.0;
+    if (pos.x < -1.0) pos.x += 2.0;
+    if (pos.y > 1.0) pos.y -= 2.0;
+    if (pos.y < -1.0) pos.y += 2.0;
+
+    p.life -= dt;
+    if (p.life <= 0.0) {
+        p.life = pt.lifeDuration;
+        p.position = vec2((r1 - 0.5) * 2.0, (r2 - 0.5) * 2.0); // Random spawn
+        p.velocity = getSpawnVelocity(pt.velocityProfile, r1, r2);
+        p.seed = r1;
+    }
+
+    p.position = pos;
+    p.velocity = vel;
+    particles[index] = p;
+}
